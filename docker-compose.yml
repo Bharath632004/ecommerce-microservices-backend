@@ -1,5 +1,7 @@
 version: '3.8'
 
+# Load variables from .env automatically (docker compose reads .env by default)
+
 # ─────────────────────────────────────────────
 # Networks
 # ─────────────────────────────────────────────
@@ -18,9 +20,37 @@ volumes:
   kafkadata:
 
 # ─────────────────────────────────────────────
-# Services — startup order:
-#   postgres → redis → zookeeper → kafka
-#   → eureka-server → app services
+# Reusable anchor for common app env vars
+# ─────────────────────────────────────────────
+x-app-env: &app-env
+  SPRING_PROFILES_ACTIVE: docker
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-ecomdb}
+  SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-ecom}
+  SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+  SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+  SPRING_JPA_HIBERNATE_DDL_AUTO: update
+  SPRING_REDIS_HOST: redis
+  SPRING_REDIS_PORT: ${REDIS_PORT:-6379}
+  SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_INTERNAL_BOOTSTRAP_SERVERS:-kafka:29092}
+  EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: ${EUREKA_SERVER_URL:-http://eureka-server:8761/eureka/}
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-86400000}
+  JWT_REFRESH_EXPIRATION_MS: ${JWT_REFRESH_EXPIRATION_MS:-604800000}
+
+x-app-depends: &app-depends
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+    eureka-server:
+      condition: service_healthy
+
+# ─────────────────────────────────────────────
+# Services
 # ─────────────────────────────────────────────
 services:
 
@@ -30,17 +60,17 @@ services:
     image: postgres:15-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ecom
-      POSTGRES_PASSWORD: ecom123
-      POSTGRES_DB: ecomdb
+      POSTGRES_USER: ${POSTGRES_USER:-ecom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-ecomdb}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
       - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ecom -d ecomdb"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecom} -d ${POSTGRES_DB:-ecomdb}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -49,9 +79,14 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    command: >-
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
     networks:
@@ -92,7 +127,6 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # PLAINTEXT_HOST exposes 9092 to the host; PLAINTEXT is used inside Docker
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
@@ -118,7 +152,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8761:8761"
+      - "${EUREKA_PORT:-8761}:8761"
     environment:
       SPRING_PROFILES_ACTIVE: docker
       EUREKA_CLIENT_REGISTER_WITH_EUREKA: "false"
@@ -147,25 +181,18 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8081:8081"
+      - "${AUTH_SERVICE_PORT:-8081}:8081"
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecomdb
-      SPRING_DATASOURCE_USERNAME: ecom
-      SPRING_DATASOURCE_PASSWORD: ecom123
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *app-env
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_PUBLIC_KEY: ${STRIPE_PUBLIC_KEY}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+    <<: *app-depends
     networks:
       - ecom-net
     healthcheck:
@@ -181,25 +208,10 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8082:8082"
+      - "${USER_SERVICE_PORT:-8082}:8082"
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecomdb
-      SPRING_DATASOURCE_USERNAME: ecom
-      SPRING_DATASOURCE_PASSWORD: ecom123
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *app-env
+    <<: *app-depends
     networks:
       - ecom-net
     healthcheck:
@@ -215,25 +227,14 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8083:8083"
+      - "${MERCHANT_SERVICE_PORT:-8083}:8083"
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecomdb
-      SPRING_DATASOURCE_USERNAME: ecom
-      SPRING_DATASOURCE_PASSWORD: ecom123
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *app-env
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_PUBLIC_KEY: ${STRIPE_PUBLIC_KEY}
+    <<: *app-depends
     networks:
       - ecom-net
     healthcheck:
@@ -249,25 +250,14 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8084:8084"
+      - "${ORDER_SERVICE_PORT:-8084}:8084"
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecomdb
-      SPRING_DATASOURCE_USERNAME: ecom
-      SPRING_DATASOURCE_PASSWORD: ecom123
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *app-env
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_PUBLIC_KEY: ${STRIPE_PUBLIC_KEY}
+    <<: *app-depends
     networks:
       - ecom-net
     healthcheck:
@@ -283,25 +273,10 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8085:8085"
+      - "${DELIVERY_SERVICE_PORT:-8085}:8085"
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ecomdb
-      SPRING_DATASOURCE_USERNAME: ecom
-      SPRING_DATASOURCE_PASSWORD: ecom123
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *app-env
+    <<: *app-depends
     networks:
       - ecom-net
     healthcheck:
